@@ -66,15 +66,19 @@ The VPC CIDR (/16 to /20) is split into 16 equal blocks:
 
 ## Usage
 
+Each environment is a pair of committed files in `env/`: `<name>.tfvars` and `<name>.s3.tfbackend`. Copy the `prod` examples and edit them. The pipeline finds every pair automatically.
+
+Through the pipeline (normal path): open a PR to get a plan comment, merge, approve in the `production` environment, and it applies. See [CI/CD and drift](#cicd-and-drift).
+
+Locally (first bootstrap or break-glass):
+
 ```bash
-cp terraform.tfvars.example terraform.tfvars   # edit values
-cp backend.tf.example backend.tf                # point at your state bucket
-terraform init
-terraform plan -out tfplan
+terraform init -backend-config=env/prod.s3.tfbackend
+terraform plan -var-file=env/prod.tfvars -out tfplan
 terraform apply tfplan
 ```
 
-Requirements: Terraform 1.9+ (1.10+ if you use the S3-native lock in `backend.tf.example`), AWS provider 5.70+, and credentials for a GovCloud account.
+Requirements: Terraform 1.9+ (1.10+ for the S3-native state lock in `env/*.s3.tfbackend`), AWS provider 6.x, and credentials for a GovCloud account.
 
 ### Notes for GovCloud
 
@@ -98,7 +102,24 @@ Put these in your landing zone or other repos; your SSP should reference them:
 - IAM, identity federation and MFA (AC-2, IA-2)
 - SSP narratives, diagrams, ports/protocols/services list, POA&M, contingency and IR plans
 
-## CI
+## CI/CD and drift
+
+This repo is one of three:
+
+| Repo | What it builds |
+| --- | --- |
+| [org-guardrails](https://github.com/bsanto165/org-guardrails) | SCPs and the pipeline roles in every account |
+| [security-baseline](https://github.com/bsanto165/security-baseline) | Org CloudTrail, Config, GuardDuty, Security Hub, Inspector, alerting |
+| fedramp-moderate-vpc (this repo) | Workload VPCs |
+
+Workflows:
+
+- `deploy.yml`: on a PR, runs a read-only plan per environment and comments it on the PR. On merge, it waits for approval in the `production` environment, then applies.
+- `drift-detection.yml`: runs `terraform plan -detailed-exitcode` nightly. If live infrastructure differs from code, it opens a `drift` issue, and it closes the issue once the environment is back in sync.
+
+Setup: create the `production` environment with required reviewers. Then set the repository variables `PLAN_ROLE_ARN` and `APPLY_ROLE_ARN` (outputs of org-guardrails) and, optionally, `AWS_REGION`.
+
+### Static checks
 
 `.github/workflows/terraform-ci.yml` runs on every pull request and on pushes to `main`:
 

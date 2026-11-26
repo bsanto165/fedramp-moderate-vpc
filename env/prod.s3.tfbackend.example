@@ -1,0 +1,7 @@
+bucket            = "acme-tfstate-111111111111"
+key               = "fedramp-moderate-vpc/prod.tfstate"
+region            = "us-gov-west-1"
+encrypt           = true
+kms_key_id        = "arn:aws-us-gov:kms:us-gov-west-1:111111111111:key/REPLACE-ME"
+use_lockfile      = true
+use_fips_endpoint = true

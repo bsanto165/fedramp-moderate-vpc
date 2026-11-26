@@ -168,3 +168,21 @@ variable "tags" {
   type        = map(string)
   default     = {}
 }
+
+variable "target_account_id" {
+  description = "Workload account to deploy into via role assumption. Null = use the caller's credentials directly."
+  type        = string
+  default     = null
+}
+
+variable "member_role_name" {
+  description = "Role assumed in the target account. The pipeline sets terraform-plan for plans and terraform-apply for applies."
+  type        = string
+  default     = "terraform-apply"
+}
+
+variable "partition" {
+  description = "AWS partition (used to build the assume-role ARN)."
+  type        = string
+  default     = "aws-us-gov"
+}

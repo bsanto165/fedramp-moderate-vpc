@@ -9,7 +9,8 @@ resource "aws_security_group" "endpoints" {
 
   # No egress block: Terraform removes the default allow-all egress rule.
 
-  tags = { Name = "${local.name_prefix}-vpce-sg" }
+  # Protected = true: the org-guardrails SCP lets only the pipeline change this SG.
+  tags = { Name = "${local.name_prefix}-vpce-sg", Protected = "true" }
 
   lifecycle {
     create_before_destroy = true

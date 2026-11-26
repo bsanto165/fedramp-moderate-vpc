@@ -1,0 +1,112 @@
+name: drift-detection
+
+# Nightly read-only plan of every environment (CM-3, CM-6, CA-7).
+#   exit 0 -> in sync; closes any open drift issue for that environment
+#   exit 2 -> drift; opens (or comments on) an issue labeled "drift"
+#   exit 1 -> plan failed; the job fails and GitHub notifies the team
+# Resolve drift by re-running the deploy workflow (revert) or codifying the change in a PR.
+
+on:
+  schedule:
+    - cron: "17 7 * * *" # 02:17 US Eastern (standard time)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-gov-west-1' }}
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      envs: ${{ steps.list.outputs.envs }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: list
+        run: |
+          envs=$(find env -maxdepth 1 -name '*.tfvars' -printf '%f\n' 2>/dev/null | sed 's/\.tfvars$//' | sort | jq -R . | jq -cs .)
+          echo "envs=${envs:-[]}" >> "$GITHUB_OUTPUT"
+
+  drift:
+    needs: discover
+    if: needs.discover.outputs.envs != '[]'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      issues: write
+    strategy:
+      fail-fast: false
+      matrix:
+        env: ${{ fromJSON(needs.discover.outputs.envs) }}
+    env:
+      TF_VAR_member_role_name: terraform-plan
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.10"
+          terraform_wrapper: false
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.PLAN_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: drift-${{ github.run_id }}
+
+      - name: terraform init
+        run: terraform init -backend-config=env/${{ matrix.env }}.s3.tfbackend
+
+      - name: terraform plan (detect drift)
+        id: plan
+        run: |
+          set +e
+          terraform plan -lock=false -refresh=true -no-color -detailed-exitcode \
+            -var-file=env/${{ matrix.env }}.tfvars > plan.txt 2>&1
+          code=$?
+          set -e
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          grep -E '^\s+# .+ (will|must) be|^Plan:' plan.txt > changes.txt || true
+          {
+            echo "### Drift check: \`${{ matrix.env }}\` (exit $code)"
+            echo '```'
+            cat changes.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$code" -eq 1 ]; then cat plan.txt; exit 1; fi
+
+      - name: Open, update or close drift issue
+        run: |
+          title="Drift detected: ${{ matrix.env }}"
+          gh label create drift --color B60205 --description "Infrastructure drift from code" --force >/dev/null
+          existing=$(gh issue list --label drift --state open --json number,title \
+            -q ".[] | select(.title == \"$title\") | .number" | head -1)
+          run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          if [ "${{ steps.plan.outputs.code }}" = "2" ]; then
+            {
+              echo "Nightly \`terraform plan\` found live infrastructure that differs from \`main\`."
+              echo
+              echo '```'
+              head -200 changes.txt
+              echo '```'
+              echo
+              echo "Run: $run_url"
+              echo
+              echo "**Resolve (CM-3):** revert by running the \`deploy\` workflow on \`main\`, or codify the change in a PR. Close this issue with the PR or run link as the change record."
+            } > body.md
+            if [ -n "$existing" ]; then
+              gh issue comment "$existing" --body-file body.md
+            else
+              gh issue create --title "$title" --label drift --body-file body.md
+            fi
+          elif [ -n "$existing" ]; then
+            gh issue close "$existing" --comment "No drift detected on $(date -u +%Y-%m-%dT%H:%MZ). Run: $run_url"
+          fi

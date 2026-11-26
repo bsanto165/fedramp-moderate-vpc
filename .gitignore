@@ -11,6 +11,5 @@ override.tf
 override.tf.json
 *_override.tf
 *_override.tf.json
-backend.tf
 .terraformrc
 terraform.rc

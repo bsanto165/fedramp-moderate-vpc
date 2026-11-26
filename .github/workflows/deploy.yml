@@ -1,0 +1,135 @@
+name: deploy
+
+# Pipeline-only change model (CM-3, CM-5):
+#   pull request -> read-only plan per environment, posted to the PR
+#   merge to main -> approval in the "production" GitHub environment -> apply
+# Every environment is a pair of files: env/<name>.tfvars + env/<name>.s3.tfbackend
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch: # re-apply main, e.g. to revert drift
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-gov-west-1' }}
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      envs: ${{ steps.list.outputs.envs }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: list
+        run: |
+          envs=$(find env -maxdepth 1 -name '*.tfvars' -printf '%f\n' 2>/dev/null | sed 's/\.tfvars$//' | sort | jq -R . | jq -cs .)
+          echo "envs=${envs:-[]}" >> "$GITHUB_OUTPUT"
+          echo "Environments: ${envs:-[]}"
+
+  plan:
+    needs: discover
+    if: github.event_name == 'pull_request' && needs.discover.outputs.envs != '[]'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
+    strategy:
+      fail-fast: false
+      matrix:
+        env: ${{ fromJSON(needs.discover.outputs.envs) }}
+    env:
+      TF_VAR_member_role_name: terraform-plan
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.10"
+          terraform_wrapper: false
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.PLAN_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: plan-${{ github.run_id }}
+
+      - name: terraform init
+        run: terraform init -backend-config=env/${{ matrix.env }}.s3.tfbackend
+
+      - name: terraform plan
+        id: plan
+        run: |
+          set +e
+          terraform plan -lock-timeout=5m -no-color -detailed-exitcode \
+            -var-file=env/${{ matrix.env }}.tfvars > plan.txt 2>&1
+          code=$?
+          set -e
+          cat plan.txt
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          [ "$code" -ne 1 ]
+
+      - name: Comment plan summary on PR
+        if: always() && steps.plan.outputs.code != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo "### Terraform plan: \`${{ matrix.env }}\`"
+            echo
+            echo '```'
+            grep -E '^\s+# .+ (will|must) be|^Plan:|^No changes|^Error' plan.txt | head -200 || true
+            echo '```'
+            echo
+            echo "Full plan: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          } > comment.md
+          gh pr comment ${{ github.event.pull_request.number }} --body-file comment.md
+
+  apply:
+    needs: discover
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && needs.discover.outputs.envs != '[]'
+    runs-on: ubuntu-latest
+    environment: production # configure required reviewers on this environment
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: true
+      max-parallel: 1
+      matrix:
+        env: ${{ fromJSON(needs.discover.outputs.envs) }}
+    env:
+      TF_VAR_member_role_name: terraform-apply
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.10"
+          terraform_wrapper: false
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.APPLY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: apply-${{ github.run_id }}
+
+      - name: terraform init
+        run: terraform init -backend-config=env/${{ matrix.env }}.s3.tfbackend
+
+      - name: terraform plan
+        run: terraform plan -lock-timeout=5m -no-color -var-file=env/${{ matrix.env }}.tfvars -out=tfplan
+
+      - name: terraform apply
+        run: terraform apply -lock-timeout=5m -no-color tfplan
