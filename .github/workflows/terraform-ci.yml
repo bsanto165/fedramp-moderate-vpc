@@ -51,8 +51,20 @@ jobs:
           # #checkov:skip comments with justification, then set to false.
           soft_fail: true
 
-      - name: Upload SARIF
+      # Code scanning upload needs GitHub Advanced Security on private repos.
+      # Without it this step fails; continue-on-error keeps the job green and
+      # the SARIF is still saved as a downloadable artifact below.
+      - name: Upload SARIF to code scanning
         if: always()
+        continue-on-error: true
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: results.sarif
+
+      - name: Save Checkov results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: checkov-results
+          path: results.sarif
+          if-no-files-found: ignore
