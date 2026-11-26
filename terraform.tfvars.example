@@ -1,0 +1,30 @@
+# Copy to terraform.tfvars and edit. terraform.tfvars is git-ignored.
+
+region      = "us-gov-west-1"
+name        = "acme-sys"
+environment = "prod"
+
+# Allocate from your IPAM; must not overlap agency or other VPC ranges.
+vpc_cidr = "10.40.0.0/16"
+az_count = 3
+
+# Recommended: hub-and-spoke with centralized inspection.
+egress_mode        = "tgw"
+transit_gateway_id = "tgw-0123456789abcdef0"
+
+# Standalone alternative (adds public subnets, IGW, NAT per AZ):
+# egress_mode = "nat"
+
+data_ports        = [5432]
+app_ingress_cidrs = ["10.0.0.0/8"] # agency network reaching the app tier over TGW
+
+organization_id     = "o-abc123xyz0"
+allowed_account_ids = ["123456789012"]
+
+log_retention_days = 365
+
+tags = {
+  SystemId           = "ACME-001"
+  DataClassification = "CUI"
+  Owner              = "platform-team@example.gov"
+}
